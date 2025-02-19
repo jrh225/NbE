@@ -18,7 +18,7 @@ mutual
     Set
 
   data Preterm=Var String |
-    Abs String Preterm |
+    Abs String Mult Pretype Preterm |
     App Preterm Preterm |
     Pair Preterm Preterm |
     Fst Preterm |
@@ -66,7 +66,7 @@ mutual
                                             (Just a, Just b) => a==b
                                             _ => False
 
-    αEquivAux (Abs x b1) (Abs y b2) map1 map2 = let bigger1 = x::map1 in let bigger2 = y::map2 in αEquivAux b1 b2 bigger1 bigger2;
+    αEquivAux (Abs x mult1 ty1 b1) (Abs y mult2 ty2 b2) map1 map2 = let bigger1 = x::map1 in let bigger2 = y::map2 in (αEquivAux b1 b2 bigger1 bigger2) && mult1==mult2 && (TypeαEquivAux ty1 ty2 bigger1 bigger2);
     αEquivAux (App a1 b1) (App a2 b2) map1 map2 = αEquivAux a1 a2 map1 map2 && αEquivAux b1 b2 map1 map2
 
     αEquivAux (Pair a1 b1) (Pair a2 b2) map1 map2 = αEquivAux a1 a2 map1 map2 && αEquivAux b1 b2 map1 map2
@@ -89,7 +89,7 @@ mutual
     Env : Type
 
     data TypeClosure = MkTypeClosure Env String Pretype
-    data Closure = MkClosure Env String Preterm
+    data Closure = MkClosure Env String Mult TypeValue Preterm
 
     data TypeValue = VPi Mult TypeValue TypeClosure | VSigma Mult TypeValue TypeClosure | VBool | VUnit | VEl Value | VSet
 
@@ -99,29 +99,24 @@ mutual
 
 
 closureName : Closure -> String
-closureName (MkClosure _ name _) = name
+closureName (MkClosure _ name _ _ _) = name
 typeClosureName : TypeClosure -> String
 typeClosureName (MkTypeClosure _ name _) = name
 
 
-Env = List  (String, Value)
+Env = List  (String, Mult, Value)
 
-data CtxEntry = Defintion TypeValue Value | Unknown TypeValue
-Ctx=List (String,CtxEntry)
+data CtxEntry = Defintion  Value | Unknown TypeValue
+Ctx=List (String, Mult, TypeValue, Maybe Value)
 
 typeLookup : Ctx -> String -> Maybe TypeValue
 typeLookup [] name = Nothing
-typeLookup ((x,entry)::ctx) y=if x==y then
-                                        case entry of
-                                            Defintion ty _ => Just ty
-                                            Unknown ty => Just ty
-                                        else
-                                            typeLookup ctx y
+typeLookup ((x,mult,ty,val)::ctx) y=if x==y then Just ty else typeLookup ctx y
 ctxToEnv : Ctx -> Env
 ctxToEnv [] = []
-ctxToEnv ((x,e)::ctx) = ((x, case e of
-                                 Defintion _ v => v
-                                 Unknown ty => VNeu ty (NVar x)
+ctxToEnv ((x,mult,ty,val)::ctx) = ((x, case val of
+                                 Just v => (mult,v)
+                                 Nothing => (mult,VNeu ty (NVar x))
                              )::(ctxToEnv ctx))
 
 
@@ -132,7 +127,9 @@ mutual
 
 
     eval env (Var x) = evalVar env x
-    eval env (Abs x body) = (Just (VAbs (MkClosure env x body)))
+    eval env (Abs x mult ty body) = do
+                                    ty <- typeEval env ty
+                                    (Just (VAbs (MkClosure env x mult ty body)))
     eval env TBool = Just VTBool
     eval env True = Just VTrue
     eval env False = Just VFalse
@@ -159,13 +156,13 @@ mutual
 
     evalVar : Env -> String -> Maybe Value
     evalVar [] x = Nothing
-    evalVar ((y, v) :: env) x = if x==y then Just v else evalVar env x
+    evalVar ((y, mult, val) :: env) x = if x==y then Just val else evalVar env x
 
     evalClosure : Closure -> Value -> Maybe Value
-    evalClosure (MkClosure env x e) v = eval ((x,v)::env) e
+    evalClosure (MkClosure env x mult ty body) v = eval ((x,mult,v)::env) body
 
     evalTypeClosure : TypeClosure -> Value -> Maybe TypeValue
-    evalTypeClosure (MkTypeClosure env x e) v = typeEval ((x,v)::env) e
+    evalTypeClosure (MkTypeClosure env x e) v = typeEval ((x,0,v)::env) e
 
 
     doApply : Value -> Value -> Maybe Value
@@ -204,14 +201,33 @@ mutual
                                      Just (VEl expr)
 
 mutual
+    readBackTypeNormal : Ctx -> TypeValue -> Maybe Pretype
+    readBackTypeNormal ctx (VPi mult dom cod) = let x=freshen (map fst ctx) (typeClosureName cod) in do
+                                                pre_dom <- readBackTypeNormal ctx dom
+                                                ty_val_cod <- evalTypeClosure cod (VNeu dom (NVar x))
+                                                pre_cod <- readBackTypeNormal ((x,0,dom,Nothing)::ctx) ty_val_cod
+                                                Just (Pi x mult pre_dom pre_cod)
+    readBackTypeNormal ctx (VSigma mult dom cod) = let x=freshen (map fst ctx) (typeClosureName cod) in do
+                                                pre_dom <- readBackTypeNormal ctx dom
+                                                ty_val_cod <- evalTypeClosure cod (VNeu dom (NVar x))
+                                                pre_cod <- readBackTypeNormal ((x,0,dom,Nothing)::ctx) ty_val_cod
+                                                Just (Sigma x mult pre_dom pre_cod)
+    readBackTypeNormal ctx VBool = Just Bool
+    readBackTypeNormal ctx VUnit = Just Unit
+    readBackTypeNormal ctx VSet = Just Set
+    readBackTypeNormal ctx (VEl val) = do
+                                      val <- readBackNormal ctx VSet val
+                                      Just (El val)
+
     readBackNormal : Ctx -> TypeValue -> Value -> Maybe Preterm
     readBackNeutral : Ctx -> Neu -> Maybe Preterm
 
     readBackNormal ctx (VPi mult dom cod) fun = let x = freshen (map fst ctx) (typeClosureName cod) in let xVal = VNeu dom (NVar x) in do
                                                   ty <- evalTypeClosure cod xVal
                                                   body <- doApply fun (VNeu dom (NVar x))
-                                                  body <- readBackNormal ((x,Unknown dom)::ctx) ty body
-                                                  Just (Abs x body)
+                                                  body <- readBackNormal ((x,mult,ty,Nothing)::ctx) ty body
+                                                  dom <- readBackTypeNormal ctx dom
+                                                  Just (Abs x mult dom body)
 
 
 
@@ -238,6 +254,11 @@ mutual
 
     readBackNormal ctx (VEl VTBool) VFalse = Just False
     readBackNormal ctx (VEl VTBool) VTrue = Just False
+
+    -- readBackNormal ctx (VEl (VNeu VSet (NVar name))) value = ctx x:T f:T->T
+    -- expr VNeu T NApp f (VNeu T x)
+    -- VEl (VNeu VSet (NVar "T"))
+
     readBackNormal ctx (VEl _) _ = Nothing
 
     readBackNeutral ctx (NVar x) = Just (Var x)
