@@ -1,34 +1,58 @@
 import Data.List
-
+import Data.Vect
+import Data.SortedMap
 Mult=Nat --For now
+scale : Mult -> Mult -> Mult
+scale n m = n * m
+
+sum : Mult -> Mult -> Mult
+sum n m = n + m
+
+Zero : Mult
+Zero = 0
+
+One : Mult
+One = 1
+
+AcceptableZero : Mult -> Bool
+AcceptableZero m = m==0
+
+AcceptableOne : Mult -> Bool
+AcceptableOne m = m==1
 
 nextName : String -> String
 nextName x = x ++ "'"
 
 freshen : List String -> String -> String
-freshen used x = if elem x used then freshen used (nextName x) else x
+freshen used x = let x=if not (x=="") then x else "x" in if elem x used then freshen used (nextName x) else x
+
+Used=SortedMap String Mult
+EmptyUsed : Used
+EmptyUsed = SortedMap.empty 
 
 
 mutual
-  data Pretype=Pi String Mult Pretype Pretype |
+  data PreClosure = MkPreClosure String Pretype
+  data Pretype = Pi String Mult Pretype Pretype |
     Sigma String Mult Pretype Pretype |
     Unit |
     Bool |
     El Preterm |
     Set
 
-  data Preterm=Var String |
+  data Preterm = Var String |
     Abs String Mult Pretype Preterm |
-    App Preterm Preterm |
-    Pair Preterm Preterm |
-    Fst Preterm |
-    Snd Preterm |
+    App Used Preterm Used Preterm Pretype|
+    Pair Used Preterm Used Preterm|
+    Fst Preterm Pretype|
+    Snd Preterm Pretype|
     TBool |
     True |
     False |
-    Star
+    Star | 
+    Elim PreClosure Used Preterm Used Preterm Used Preterm |
+    TPi String Mult Preterm Preterm
   -- Pair/Unit binding later
-  -- Elim later
   -- dependent function type?
 
 get : String -> List String -> Maybe Nat
@@ -38,8 +62,7 @@ get _ [] = Nothing
 mutual
     TypeαEquivAux : Pretype -> Pretype -> List String -> List String -> Bool
 
-    TypeαEquivAux (Pi x m1 a1 b1) (Pi y m2 a2 b2) map1 map2 =
-    TypeαEquivAux a1 a2 map1 map2
+    TypeαEquivAux (Pi x m1 a1 b1) (Pi y m2 a2 b2) map1 map2 = TypeαEquivAux a1 a2 map1 map2
       && let bigger1 = x::map1 in let bigger2 = y::map2 in  TypeαEquivAux b1 b2 bigger1 bigger2
       && m1==m2
 
@@ -51,7 +74,7 @@ mutual
     TypeαEquivAux Bool Bool _ _ = True
     TypeαEquivAux Unit Unit _ _ = True
     TypeαEquivAux Set Set _ _ = True
-    TypeαEquivAux (El t1) (El t2) _ _ = αEquiv t1 t2
+    TypeαEquivAux (El t1) (El t2) _ _ = αEquiv t1 t2 -- Fix
     TypeαEquivAux _ _ _ _ = False
 
     TypeαEquiv : Pretype -> Pretype -> Bool
@@ -67,219 +90,473 @@ mutual
                                             _ => False
 
     αEquivAux (Abs x mult1 ty1 b1) (Abs y mult2 ty2 b2) map1 map2 = let bigger1 = x::map1 in let bigger2 = y::map2 in (αEquivAux b1 b2 bigger1 bigger2) && mult1==mult2 && (TypeαEquivAux ty1 ty2 bigger1 bigger2);
-    αEquivAux (App a1 b1) (App a2 b2) map1 map2 = αEquivAux a1 a2 map1 map2 && αEquivAux b1 b2 map1 map2
+    αEquivAux (App u1 a1 v1 b1 _) (App u2 a2 v2 b2 _) map1 map2 = αEquivAux a1 a2 map1 map2 && αEquivAux b1 b2 map1 map2 -- u1=u2?
 
-    αEquivAux (Pair a1 b1) (Pair a2 b2) map1 map2 = αEquivAux a1 a2 map1 map2 && αEquivAux b1 b2 map1 map2
+    αEquivAux (Pair u1 a1 v1 b1) (Pair u2 a2 v2 b2) map1 map2 = αEquivAux a1 a2 map1 map2 && αEquivAux b1 b2 map1 map2 -- u1=u2?
 
-    αEquivAux (Fst e1) (Fst e2) map1 map2 = αEquivAux e1 e2 map1 map2
-    αEquivAux (Snd e1) (Snd e2) map1 map2 = αEquivAux e1 e2 map1 map2
+    αEquivAux (Fst e1 _) (Fst e2 _) map1 map2 = αEquivAux e1 e2 map1 map2
+    αEquivAux (Snd e1 _) (Snd e2 _) map1 map2 = αEquivAux e1 e2 map1 map2
     αEquivAux TBool TBool _ _ = True
     αEquivAux True True _ _ = True
     αEquivAux False False _ _ = True
     αEquivAux Star Star _ _ = True
+    αEquivAux (Elim _ _ t1 _ f1 _ b1) (Elim _ _ t2 _ f2 _ b2) map1 map2 = αEquivAux t1 t2 map1 map2 && αEquivAux f1 f2 map1 map2 && αEquivAux b1 b2 map1 map2
+    αEquivAux (TPi x m1 a1 b1) (TPi y m2 a2 b2) map1 map2 = αEquivAux a1 a2 map1 map2
+      && let bigger1 = x::map1 in let bigger2 = y::map2 in  αEquivAux b1 b2 bigger1 bigger2
+      && m1==m2
     αEquivAux _ _ _ _ = False
 
     αEquiv : Preterm -> Preterm -> Bool
     αEquiv a b = αEquivAux a b [] []
 
-
-
--- Merge all of this?
 mutual
-    Env : Type
+    Env : Nat -> Type
 
-    data TypeClosure = MkTypeClosure Env String Pretype
-    data Closure = MkClosure Env String Mult TypeValue Preterm
+
+    data TypeClosure : Type where
+        MkTypeClosure : {n:Nat} -> Env n -> String -> TypeValue -> Pretype -> TypeClosure
+    data Closure : Type where
+        MkClosure : {n:Nat} -> Env n -> String -> Mult -> TypeValue -> Preterm -> Closure
 
     data TypeValue = VPi Mult TypeValue TypeClosure | VSigma Mult TypeValue TypeClosure | VBool | VUnit | VEl Value | VSet
 
-    data Value = VAbs Closure | VPair Value Value | VTBool | VFalse | VTrue | VStar | VNeu TypeValue Neu
-    data Neu = NVar String | NApp Neu Norm | NFst Neu | NSnd Neu
+    data Value = VAbs Closure | VPair Used Value Used Value | VTBool | VFalse | VTrue | VStar | VNeu TypeValue Neu | VTPi Mult Value Closure
+    data Neu = NVar String | NApp Used Neu Used Norm TypeValue | NFst Neu TypeValue | NSnd Neu TypeValue | VElim PreClosure Used Norm Used Norm Used Neu
     data Norm = MkNormal TypeValue Value
+    
 
 
 closureName : Closure -> String
 closureName (MkClosure _ name _ _ _) = name
+closureTy : Closure -> TypeValue
+closureTy (MkClosure _ _ _ ty _) = ty
+closureMult : Closure -> Mult
+closureMult (MkClosure _ _ m _ _) = m
 typeClosureName : TypeClosure -> String
-typeClosureName (MkTypeClosure _ name _) = name
+typeClosureName (MkTypeClosure _ name _ _) = name
 
 
-Env = List  (String, Mult, Value)
+Env n = Vect n (String, Mult, Value, TypeValue)
 
-data CtxEntry = Defintion  Value | Unknown TypeValue
+zeroEnv : Env n -> Env n
+zeroEnv [] = []
+zeroEnv ((v,m,tm,ty)::env) = ((v,Zero,tm,ty)::(zeroEnv env))
+
+getFresh : {n:Nat} -> Vect n (String, Mult, Value, TypeValue) -> String -> String
+getFresh env var= freshen ((toList env) <&> fst) var
+
+usedLookup : String -> Used -> Mult
+usedLookup v used = case lookup v used of 
+                      Just m => m
+                      Nothing => 0
+
+usedIsEmpty : Used -> Bool
+usedIsEmpty used = all (\(_,count) => count == Zero) (Data.SortedMap.toList used)
+
+sumUsed : Used -> Used -> Used
+sumUsed u1 u2 = mergeWith sum u1 u2
+
+scaleUsed : Mult -> Used -> Used
+scaleUsed m used = SortedMap.fromList (map (\(v,count) => (v,scale m count)) (Data.SortedMap.toList used))
+
+checkUsed : Env n -> Used -> Bool
+checkUsed [] used = usedIsEmpty used
+checkUsed ((v,m,_,_)::env) used = m==usedLookup v used && checkUsed env (delete v used)
+
+checkAccept : Env n -> Bool
+checkAccept [] = True
+checkAccept ((_,m,_,_)::env) = AcceptableZero m
+
+checkAcceptExcept : Env n -> String -> Bool
+checkAcceptExcept [] var = False
+checkAcceptExcept ((v,m,_,_)::env) v2 = if v==v2 then AcceptableOne m && checkAccept env else AcceptableZero m && checkAcceptExcept env v2
+
+take : Env n -> Used -> Env n
+take [] used = []
+take ((v,m,val,ty)::env) used = (v,usedLookup v used,val,ty)::(take env (delete v used))
+
+envToUsed : Env n -> Used
+envToUsed [] = SortedMap.empty
+envToUsed ((v,m,_,_)::env) = SortedMap.insert v m (envToUsed env)
+
 Ctx=List (String, Mult, TypeValue, Maybe Value)
 
 typeLookup : Ctx -> String -> Maybe TypeValue
 typeLookup [] name = Nothing
 typeLookup ((x,mult,ty,val)::ctx) y=if x==y then Just ty else typeLookup ctx y
-ctxToEnv : Ctx -> Env
-ctxToEnv [] = []
-ctxToEnv ((x,mult,ty,val)::ctx) = ((x, case val of
-                                 Just v => (mult,v)
-                                 Nothing => (mult,VNeu ty (NVar x))
-                             )::(ctxToEnv ctx))
+ctxToEnv : Ctx -> (n:Nat  ** Env n)
+ctxToEnv [] = (0**[])
+ctxToEnv ((x,mult,ty,val)::ctx) = let (len ** env) = (ctxToEnv ctx) in (S len**((x, case val of
+                                 Just v => (mult,v,ty)
+                                 Nothing => (mult,VNeu ty (NVar x),ty)
+                             )::env))
 
 
-
+data Existence = Exists | Erased
 
 mutual
-    eval : Env -> Preterm -> Maybe Value
+    TypeValueαEquivAux : TypeValue -> TypeValue -> List String -> List String -> Maybe Bool
+    ValueαEquivAux : Value -> Value -> List String -> List String -> Maybe Bool
+    NeutralαEquivAux : Neu -> Neu -> List String -> List String -> Maybe Bool
+
+    TypeValueαEquiv : TypeValue -> TypeValue -> Maybe Bool
+    TypeValueαEquiv ty1 ty2 = TypeValueαEquivAux ty1 ty2 [] []
+    
+    TypeValueαEquivAux (VPi mult1 dom1 cod1) (VPi mult2 dom2 cod2) m1 m2 = let x1 = typeClosureName cod1 in let x2 = typeClosureName cod1 in do 
+                                                                          eq_dom <- TypeValueαEquivAux dom1 dom2 m1 m2
+                                                                          cod1 <- evalTypeClosure cod1 (VNeu dom1 (NVar x1))
+                                                                          cod2 <- evalTypeClosure cod2 (VNeu dom2 (NVar x2))
+                                                                          eq_cod <- TypeValueαEquivAux cod1 cod2 (x1::m1) (x2::m2)
+                                                                          Just (eq_dom && eq_cod && mult1==mult2)
+
+    TypeValueαEquivAux (VEl (VTPi m dom1 (MkClosure env x _ dom2 cod))) other m1 m2 = TypeValueαEquivAux (VPi m (VEl dom1) (MkTypeClosure env x dom2 (El cod))) other m1 m2
+    TypeValueαEquivAux fst  snd@(VEl (VTPi m dom1 (MkClosure env x _ dom2 cod))) m1 m2 = TypeValueαEquivAux snd fst m1 m2
+
+    TypeValueαEquivAux (VSigma mult1 ty_fst1 ty_snd1) (VSigma mult2 ty_fst2 ty_snd2) m1 m2 = let x1 = typeClosureName ty_snd1 in let x2 = typeClosureName ty_snd1 in do 
+                                                                          eq_fst <- TypeValueαEquivAux ty_fst1 ty_fst2 m1 m2
+                                                                          ty_snd1 <- evalTypeClosure ty_snd1 (VNeu ty_fst1 (NVar x1))
+                                                                          ty_snd2 <- evalTypeClosure ty_snd2 (VNeu ty_fst2 (NVar x2))
+                                                                          eq_snd <- TypeValueαEquivAux ty_snd1 ty_snd2 (x1::m1) (x2::m2)
+                                                                          Just (eq_fst && eq_snd && mult1==mult2)
+
+    TypeValueαEquivAux VBool VBool _ _ = Just True
+    TypeValueαEquivAux VBool (VEl VTBool) _ _ = Just True
+    TypeValueαEquivAux (VEl VTBool) VBool _ _ = Just True
 
 
-    eval env (Var x) = evalVar env x
-    eval env (Abs x mult ty body) = do
-                                    ty <- typeEval env ty
-                                    (Just (VAbs (MkClosure env x mult ty body)))
-    eval env TBool = Just VTBool
-    eval env True = Just VTrue
-    eval env False = Just VFalse
-    eval env Star = Just VStar
+    TypeValueαEquivAux VUnit VUnit _ _ = Just True
 
-    eval env (App rator rand) = do
-                            fun <- eval env rator
-                            arg <- eval env rand
-                            doApply fun arg
+    TypeValueαEquivAux (VEl x) (VEl y) m1 m2 = ValueαEquivAux x y m1 m2
 
-    eval env (Pair a b) = do
-                            a <- eval env a
-                            b <- eval env b
-                            Just (VPair a b)
+    TypeValueαEquivAux VSet VSet _ _ = Just True
 
-    eval env (Fst pair) = do
-                            pair <- eval env pair
-                            doFst pair
+    TypeValueαEquivAux _ _ _ _ = Just False
 
-    eval env (Snd pair) = do
-                            pair <- eval env pair
-                            doSnd pair
+    ValueαEquivAux (VAbs c1) (VAbs c2) m1 m2 = let x1 = closureName c1 in let x2 = closureName c1 in do 
+                                          eq_dom <- TypeValueαEquivAux (closureTy c1) (closureTy c2) m1 m2
+                                          b1 <- evalClosure c1 (VNeu (closureTy c1) (NVar x1)) VSet Erased
+                                          b2 <- evalClosure c2 (VNeu (closureTy c2) (NVar x2)) VSet Erased
+                                          eq_b <- ValueαEquivAux b1 b2 (x1::m1) (x2::m2)
+                                          Just (eq_b && (closureMult c1 == closureMult c2) && eq_dom)
+    ValueαEquivAux (VPair _ fst1 _ snd1) (VPair _ fst2 _ snd2) m1 m2= do
+                                                         eq_fst <- ValueαEquivAux fst1 fst2 m1 m2
+                                                         eq_snd <- ValueαEquivAux snd1 snd2 m1 m2
+                                                         Just (eq_fst && eq_snd)
+    ValueαEquivAux VTBool VTBool _ _ = Just True
+    ValueαEquivAux VFalse VFalse _ _ = Just True
+    ValueαEquivAux VTrue VTrue _ _ = Just True
+    ValueαEquivAux VStar VStar _ _ = Just True
+    ValueαEquivAux (VTPi mult1 dom1 cod1) (VTPi mult2 dom2 cod2) m1 m2 = let x1 = closureName cod1 in let x2 = closureName cod1 in do 
+                                                                          eq_dom <- ValueαEquivAux dom1 dom2 m1 m2
+                                                                          cod1 <- evalClosure cod1 (VNeu (VEl dom1) (NVar x1)) VSet Erased
+                                                                          cod2 <- evalClosure cod2 (VNeu (VEl dom2) (NVar x2)) VSet Erased
+                                                                          eq_cod <- ValueαEquivAux cod1 cod2 (x1::m1) (x2::m2)
+                                                                          Just (eq_dom && eq_cod && mult1==mult2) 
+
+    ValueαEquivAux (VNeu ty1 neu1) (VNeu ty2 neu2) m1 m2 = do 
+                                                            eq_ty <- TypeValueαEquivAux ty1 ty2 m1 m2
+                                                            eq_neu <- NeutralαEquivAux neu1 neu2 m1 m2
+                                                            Just (eq_ty && eq_neu)
+
+    ValueαEquivAux _ _ _ _ = Just False
 
 
-    evalVar : Env -> String -> Maybe Value
-    evalVar [] x = Nothing
-    evalVar ((y, mult, val) :: env) x = if x==y then Just val else evalVar env x
+    NeutralαEquivAux (NVar x) (NVar y) m1 m2 = case (get x m1, get y m2) of
+                                            (Nothing, Nothing) => Just (x==y)
+                                            (Just a, Just b) => Just (a==b)
+                                            _ => Just False
 
-    evalClosure : Closure -> Value -> Maybe Value
-    evalClosure (MkClosure env x mult ty body) v = eval ((x,mult,v)::env) body
+    NeutralαEquivAux (NApp _ neu1 _ (MkNormal ty1 val1) _) (NApp _ neu2 _ (MkNormal ty2 val2) _) m1 m2 = do
+                                                                                  eq_neu <- NeutralαEquivAux neu1 neu2 m1 m2
+                                                                                  eq_ty <- TypeValueαEquivAux ty1 ty2 m1 m2
+                                                                                  eq_val <- ValueαEquivAux val1 val2 m1 m2
+                                                                                  Just (eq_neu && eq_ty && eq_val)
+    NeutralαEquivAux (NFst neu1 _) (NFst neu2 _) m1 m2 = NeutralαEquivAux neu1 neu2 m1 m2
+    NeutralαEquivAux (NSnd neu1 _) (NSnd neu2 _) m1 m2 = NeutralαEquivAux neu1 neu2 m1 m2
+    NeutralαEquivAux (VElim _ _ (MkNormal tty1 tval1) _ (MkNormal fty1 fval1) _ neu1) (VElim _ _ (MkNormal tty2 tval2) _ (MkNormal fty2 fval2) _ neu2) m1 m2 = do
+                                                                                  eq_neu <- NeutralαEquivAux neu1 neu2 m1 m2
+                                                                                  eq_tty <- TypeValueαEquivAux tty1 tty2 m1 m2
+                                                                                  eq_fty <- TypeValueαEquivAux fty1 fty2 m1 m2
+                                                                                  eq_tval <- ValueαEquivAux tval1 tval2 m1 m2
+                                                                                  eq_fval <- ValueαEquivAux fval1 fval2 m1 m2
+                                                                                  Just (eq_neu && eq_tty && eq_fty && eq_tval && eq_fval)
+    NeutralαEquivAux _ _ _ _ = Just False
+
+
+
+    eval : {n:Nat} -> Env n -> Preterm -> TypeValue -> Existence -> Maybe Value
+
+
+    eval env (Var x) ty existence = evalVar env x ty existence
+    eval env (Abs x mult1 ty1 body) (VPi mult2 dom cod) existence = let x'=getFresh env x in let xVal=VNeu dom (NVar x') in do
+                                    ty1 <- typeEval (zeroEnv env) ty1
+                                    ty_eq <- TypeValueαEquiv dom ty1
+                                    output_ty <- evalTypeClosure cod xVal
+                                    _ <- evalClosure (MkClosure env x mult1 ty1 body) xVal output_ty existence
+                                    if ty_eq && mult1==mult2 then Just (VAbs (MkClosure env x mult1 ty1 body)) else Nothing
+
+    eval env (Abs x mult1 ty1 body) (VEl (VTPi mult2 dom1 (MkClosure cenv y m (VEl dom2) cod))) existence = eval env (Abs x mult1 ty1 body) (VPi mult2 (VEl dom1) (MkTypeClosure cenv y (VEl dom2) (El cod))) existence
+
+    eval env TBool VSet existence = Just VTBool
+    eval env True VBool existence = Just VTrue
+    eval env True (VEl VTBool) existence = Just VTrue
+    eval env False VBool existence = Just VFalse
+    eval env False (VEl VTBool) existence = Just VFalse
+    eval env Star VUnit existence = Just VStar
+
+    eval env (App u rator v rand (Pi var mult dom cod)) ty existence = let argExist=if mult==0 then Erased else existence in do
+                            dom <- typeEval (zeroEnv env) dom
+                            arg <- eval (take env v) rand dom argExist
+                            cod_closure <- Just (MkTypeClosure env var dom cod)
+                            fun <- eval (take env u) rator (VPi mult dom cod_closure) existence 
+                            output_ty <- evalTypeClosure cod_closure arg
+                            ty_eq <- TypeValueαEquiv ty output_ty
+                            output <- doApply u fun v arg output_ty existence
+                            if ty_eq && checkUsed env (sumUsed u (scaleUsed mult v)) then Just output else Nothing
+
+    eval env (Pair u a v b) (VSigma mult fst_ty snd_ty) existence=  do
+                            a <- eval (take env u) a fst_ty existence 
+                            snd_ty <- evalTypeClosure snd_ty a
+                            b <- eval (take env v) b snd_ty existence 
+                            if checkUsed env (sumUsed u v) then Just (VPair u a v b) else Nothing
+
+    eval env (Fst pair (Sigma var mult fst_ty snd_ty)) ty Erased=  do
+                            fst_ty <- typeEval (zeroEnv env) fst_ty
+                            snd_ty <- Just (MkTypeClosure env var fst_ty snd_ty)
+                            pair <- eval env pair (VSigma mult fst_ty snd_ty) Erased
+                            fst <- doFst pair
+                            Just fst
+
+    eval env (Fst pair p_ty) ty Exists = Nothing
+
+    eval env (Snd pair (Sigma var mult fst_ty snd_ty)) ty Erased= do
+                            fst_ty <- typeEval (zeroEnv env) fst_ty
+                            snd_ty <- Just (MkTypeClosure env var fst_ty snd_ty)
+                            pair <- eval env pair (VSigma mult fst_ty snd_ty) Erased
+                            snd <- doSnd pair
+                            Just snd
+
+    eval env (Snd pair p_ty) ty Exists = Nothing
+
+    eval env (Elim st u t v f w b) ty existence = do
+                            b <- eval env b VBool existence
+                            tty <- evalPreClosure (zeroEnv env) st VTrue VBool
+                            fty <- evalPreClosure (zeroEnv env) st VFalse VBool
+                            output_ty  <- evalPreClosure (zeroEnv env) st b VBool
+                            ty_eq <- TypeValueαEquiv ty output_ty
+                            t <- eval env t tty existence
+                            f <- eval env f tty existence
+                            if ty_eq then case b of 
+                                   VTrue => Just t
+                                   VFalse => Just f 
+                                   VNeu _ neu => Just (VNeu output_ty (VElim st u (MkNormal tty t) v (MkNormal fty f) w neu))
+                                   _ => Nothing
+                                   else Nothing
+    eval env (TPi x m dom cod) VSet Erased = do
+                                 dom <- eval env dom VSet existence
+                                 Just (VTPi m dom (MkClosure env x m (VEl dom) cod)) 
+
+
+    eval _ _ _ _ = Nothing
+                            
+
+
+    evalVar : {n:Nat} -> Env n -> String -> TypeValue -> Existence -> Maybe Value
+    evalVar env x ty existence = do
+                           i <- findIndex (\y=> x==fst y) env
+                           eq_ty <- TypeValueαEquiv ty (snd (snd (snd (index i env))))
+                           if eq_ty && case existence of 
+                                                                                 Exists => checkAcceptExcept env x 
+                                                                                 Erased => checkAccept env
+                                                                               then Just (fst (snd (snd (index i env)))) else Nothing
+    evalPreClosure : {n:Nat} -> Env n-> PreClosure -> Value -> TypeValue -> Maybe TypeValue
+    evalPreClosure env (MkPreClosure x body) val ty = if x=="" then typeEval (zeroEnv env) body else typeEval ((x,0,val,ty)::(zeroEnv env)) body
+
+    evalClosure : Closure -> Value -> TypeValue -> Existence -> Maybe Value
+    evalClosure (MkClosure env x mult ty1 body) v ty2 existence = let mult = case existence of 
+                                                                                 Exists => mult 
+                                                                                 Erased => Zero
+                                                                              in if x=="" then eval env body ty2 existence else eval ((x,mult,v,ty1)::env) body ty2 existence
 
     evalTypeClosure : TypeClosure -> Value -> Maybe TypeValue
-    evalTypeClosure (MkTypeClosure env x e) v = typeEval ((x,0,v)::env) e
+    evalTypeClosure (MkTypeClosure env x dom cod) v =if x=="" then typeEval (zeroEnv env) cod else typeEval ((x,0,v,dom)::(zeroEnv env)) cod
 
 
-    doApply : Value -> Value -> Maybe Value
-    doApply (VAbs closure) arg = evalClosure closure arg
-    doApply (VNeu (VPi mult dom cod) neu) arg = do
-                                              ty <-evalTypeClosure cod arg
-                                              Just (VNeu ty (NApp neu (MkNormal dom arg)))
-    doApply _ _ = Nothing
+    doApply : Used -> Value -> Used ->  Value -> TypeValue -> Existence -> Maybe Value
+    doApply _ (VAbs closure) _ arg ty existence = evalClosure closure arg ty existence
+    doApply u (VNeu (VPi mult dom cod) neu) v arg ty existence = do
+                                              ty2 <- evalTypeClosure cod arg
+                                              eq <- TypeValueαEquiv ty ty2
+                                              if eq then Just (VNeu ty (NApp u neu v (MkNormal dom arg) (VPi mult dom cod))) else Nothing
+    doApply _ _ _ _ _ _ = Nothing
 
     doFst : Value -> Maybe Value
-    doFst (VPair v1 v2) = Just v1
-    doFst (VNeu (VSigma mult fTy sTy) neu) = Just (VNeu fTy (NFst neu))
+    doFst (VPair _ v1 _ v2) = Just v1
+    doFst (VNeu (VSigma mult fTy sTy) neu) = Just (VNeu fTy (NFst neu (VSigma mult fTy sTy)) )
     doFst _ = Nothing
 
     doSnd : Value -> Maybe Value
-    doSnd (VPair v1 v2) =Just v2
+    doSnd (VPair _ v1 _ v2) =Just v2
     doSnd v@(VNeu (VSigma mult fTy sTy) neu) = do
                                              dom <- doFst v
                                              ty <- evalTypeClosure sTy dom
-                                             Just (VNeu ty (NSnd neu))
+                                             Just (VNeu ty (NSnd neu (VSigma mult fTy sTy)))
     doSnd _ = Nothing
 
-    typeEval : Env -> Pretype -> Maybe TypeValue
+    typeEval : {n:Nat} -> Env n -> Pretype -> Maybe TypeValue
     typeEval env (Pi name mult dom cod) = do
                                             dom <- typeEval env dom
-                                            Just (VPi mult dom (MkTypeClosure env name cod))
+                                            Just (VPi mult dom (MkTypeClosure env name dom cod))
     typeEval env (Sigma name mult fTy sTy) = do
                                             fTy <- typeEval env fTy
-                                            Just (VSigma mult fTy (MkTypeClosure env name sTy))
+                                            Just (VSigma mult fTy (MkTypeClosure env name fTy sTy))
 
-    typeEval env Unit = Just (VUnit)
-    typeEval env Bool = Just (VBool)
-    typeEval env Set = Just (VSet)
+    typeEval env Unit = if checkAccept env then Just (VUnit) else Nothing
+    typeEval env Bool = if checkAccept env then Just (VBool) else Nothing
+    typeEval env Set = if checkAccept env then Just (VSet) else Nothing
     typeEval env (El expr) = do
-                                     expr <- eval env expr
+                                     expr <- eval env expr VSet Erased
                                      Just (VEl expr)
 
-mutual
-    readBackTypeNormal : Ctx -> TypeValue -> Maybe Pretype
-    readBackTypeNormal ctx (VPi mult dom cod) = let x=freshen (map fst ctx) (typeClosureName cod) in do
-                                                pre_dom <- readBackTypeNormal ctx dom
-                                                ty_val_cod <- evalTypeClosure cod (VNeu dom (NVar x))
-                                                pre_cod <- readBackTypeNormal ((x,0,dom,Nothing)::ctx) ty_val_cod
+    readBackTypeNormal : {n:Nat} -> Env n -> TypeValue -> Maybe Pretype
+    readBackTypeNormal env (VPi mult dom cod) = let x=getFresh env (typeClosureName cod) in let xVal=VNeu dom (NVar x) in do
+                                                pre_dom <- readBackTypeNormal env dom
+                                                ty_val_cod <- evalTypeClosure cod xVal
+                                                pre_cod <- readBackTypeNormal ((x,0,xVal,dom)::env) ty_val_cod
                                                 Just (Pi x mult pre_dom pre_cod)
-    readBackTypeNormal ctx (VSigma mult dom cod) = let x=freshen (map fst ctx) (typeClosureName cod) in do
-                                                pre_dom <- readBackTypeNormal ctx dom
-                                                ty_val_cod <- evalTypeClosure cod (VNeu dom (NVar x))
-                                                pre_cod <- readBackTypeNormal ((x,0,dom,Nothing)::ctx) ty_val_cod
+    readBackTypeNormal env (VSigma mult dom cod) = let x=getFresh env (typeClosureName cod) in let xVal=VNeu dom (NVar x) in do
+                                                pre_dom <- readBackTypeNormal env dom
+                                                ty_val_cod <- evalTypeClosure cod xVal
+                                                pre_cod <- readBackTypeNormal ((x,0,xVal,dom)::env) ty_val_cod
                                                 Just (Sigma x mult pre_dom pre_cod)
-    readBackTypeNormal ctx VBool = Just Bool
-    readBackTypeNormal ctx VUnit = Just Unit
-    readBackTypeNormal ctx VSet = Just Set
-    readBackTypeNormal ctx (VEl val) = do
-                                      val <- readBackNormal ctx VSet val
+    readBackTypeNormal env VBool = if checkAccept env then Just Bool else Nothing
+    readBackTypeNormal env VUnit =if checkAccept env then Just Unit else Nothing
+    readBackTypeNormal env VSet = if checkAccept env then Just Set else Nothing
+    readBackTypeNormal env (VEl val) = do
+                                      val <- readBackNormal env VSet val Erased
                                       Just (El val)
 
-    readBackNormal : Ctx -> TypeValue -> Value -> Maybe Preterm
-    readBackNeutral : Ctx -> Neu -> Maybe Preterm
+    readBackNormal : {n:Nat} -> Env n -> TypeValue -> Value -> Existence -> Maybe Preterm
+    readBackNeutral : {n:Nat} -> Env n -> Neu -> Existence -> Maybe Preterm
 
-    readBackNormal ctx (VPi mult dom cod) fun = let x = freshen (map fst ctx) (typeClosureName cod) in let xVal = VNeu dom (NVar x) in do
-                                                  ty <- evalTypeClosure cod xVal
-                                                  body <- doApply fun (VNeu dom (NVar x))
-                                                  body <- readBackNormal ((x,mult,ty,Nothing)::ctx) ty body
-                                                  dom <- readBackTypeNormal ctx dom
+    readBackNormal env (VPi mult dom cod) fun existence = let mult' = case existence of 
+                                                                                 Exists => mult 
+                                                                                 Erased => Zero
+                                                                              in let x = getFresh env(typeClosureName cod) in let xVal = VNeu dom (NVar x) in do
+                                                  cod <- evalTypeClosure cod xVal
+                                                  body <- doApply (envToUsed env) fun (SortedMap.fromList [("x",1)]) xVal cod existence
+                                                  body <- readBackNormal ((x,mult',xVal,dom)::env) cod body existence
+                                                  dom <- readBackTypeNormal env dom
                                                   Just (Abs x mult dom body)
 
 
 
-    readBackNormal ctx (VSigma mult fTy sTy) pair = do
+    readBackNormal env (VSigma mult fTy sTy) pair Erased= do
                                                   fst <- doFst pair
                                                   snd <- doSnd pair
 
                                                   sTy <- evalTypeClosure sTy fst
 
-                                                  fst <- readBackNormal ctx fTy fst
-                                                  snd <- readBackNormal ctx sTy snd
-                                                  Just (Pair fst snd)
-
-    readBackNormal ctx t (VNeu t′ neu) = readBackNeutral ctx neu -- t==t'?
-    readBackNormal ctx VBool VFalse = Just False
-    readBackNormal ctx VBool VTrue = Just True
-    readBackNormal ctx VBool _ = Nothing
-
-    readBackNormal ctx VUnit VStar = Just Star
-    readBackNormal ctx VUnit _ = Nothing
-
-    readBackNormal ctx VSet VTBool = Just TBool
-    readBackNormal ctx VSet _ = Nothing
-
-    readBackNormal ctx (VEl VTBool) VFalse = Just False
-    readBackNormal ctx (VEl VTBool) VTrue = Just False
-
-    -- readBackNormal ctx (VEl (VNeu VSet (NVar name))) value = ctx x:T f:T->T
-    -- expr VNeu T NApp f (VNeu T x)
-    -- VEl (VNeu VSet (NVar "T"))
-
-    readBackNormal ctx (VEl _) _ = Nothing
-
-    readBackNeutral ctx (NVar x) = Just (Var x)
-    readBackNeutral ctx (NApp neu (MkNormal ty arg)) = do
-                                            fun <- readBackNeutral ctx neu
-                                            arg <- readBackNormal ctx ty arg
-                                            Just (App fun arg)
-    readBackNeutral ctx (NFst neu) = do
-                                         pair <- readBackNeutral ctx neu
-                                         Just (Fst pair)
-    readBackNeutral ctx (NSnd neu) = do
-                                         pair <- readBackNeutral ctx neu
-                                         Just (Snd pair)
+                                                  fst <- readBackNormal env fTy fst Erased
+                                                  snd <- readBackNormal env sTy snd Erased
+                                                  Just (Pair SortedMap.empty fst SortedMap.empty snd)
 
 
-norm : Env -> Preterm -> Pretype -> Maybe Preterm
-norm env expr ty = do
-                  ty <- typeEval env ty
-                  value <- eval env expr
-                  readBackNormal [] ty value
+    readBackNormal env VUnit _ Erased =if checkAccept env then Just Star else Nothing
+    readBackNormal env t (VNeu t′ neu) existence= readBackNeutral env neu existence -- t==t'?
 
-fn=VPi 1 VUnit (MkTypeClosure [] "k" Unit)
-fn2=VPi 1 fn (MkTypeClosure [] "k" Unit)
-env=[("s",VNeu fn (NVar "s")),("k",VNeu fn2 (NVar "k"))]
+    readBackNormal env (VSigma mult fTy sTy) (VPair u fst v snd) Exists= do
+
+                                              sTy <- evalTypeClosure sTy fst
+
+                                              fst <- readBackNormal env fTy fst Erased
+                                              snd <- readBackNormal env sTy snd Erased
+                                              Just (Pair u fst v snd)
+
+    readBackNormal env (VSigma mult fTy sTy) _ _ = Nothing
+    readBackNormal env VBool VFalse _ =if checkAccept env then Just False else Nothing
+    readBackNormal env VBool VTrue _ =if checkAccept env then Just True else Nothing
+    readBackNormal env VBool _ _ = Nothing
+
+    readBackNormal env VUnit VStar _ =if checkAccept env then Just Star else Nothing
+    readBackNormal env VUnit _ _= Nothing
+
+    readBackNormal env VSet VTBool _ =if checkAccept env then Just TBool else Nothing
+    readBackNormal env VSet _  _= Nothing
+
+    readBackNormal env (VEl VTBool) VFalse _= if checkAccept env then Just False else Nothing
+    readBackNormal env (VEl VTBool) VTrue _= if checkAccept env then Just False else Nothing
+
+
+    readBackNormal env (VEl _) _ _= Nothing
+
+    readBackNeutral env (NVar x) _ =Just (Var x)
+    readBackNeutral env (NApp u neu v (MkNormal ty arg) ty2) existence = do -- Fix
+                                            fun <- readBackNeutral env neu existence
+                                            arg <- readBackNormal env ty arg existence
+                                            ty2 <- readBackTypeNormal env ty2
+                                            Just (App u fun v arg ty2)
+    readBackNeutral env (NFst neu ty)  Erased = do
+                                         pair <- readBackNeutral env neu Erased
+                                         ty <- readBackTypeNormal env ty
+                                         Just (Fst pair ty)
+    readBackNeutral env (NSnd neu ty) Erased = do
+                                         pair <- readBackNeutral env neu Erased
+                                         ty <- readBackTypeNormal env ty
+                                         Just (Snd pair ty)
+    readBackNeutral env (NFst neu ty) Exists=Nothing
+    readBackNeutral env (NSnd neu ty) Exists=Nothing
+
+    readBackNeutral env (VElim st u (MkNormal tty t) v (MkNormal fty f) w b) existence=do 
+                                                                                       t <- readBackNormal (take env u) tty t existence
+                                                                                       f <- readBackNormal (take env v) fty f existence
+                                                                                       b <- readBackNeutral (take env w) b existence
+                                                                                       Just (Elim st u t v f w b)
+
+
+    norm : {n:Mult} -> Env n -> Preterm -> Pretype -> Existence -> Maybe Preterm
+    norm env expr ty existence = do
+                    ty <- typeEval (zeroEnv env) ty
+                    value <- eval env expr ty existence
+                    readBackNormal env ty value existence
+
+
+fnType:  String -> Mult -> Pretype -> Pretype -> Pretype
+fnType v mult x y= Pi v mult x y
+
+typeVar : String -> Pretype
+typeVar v = El (Var v)
+
+
+-- Examples
+example_unit_fn = norm [] (Abs "x" 1 Unit (Var "x")) (fnType "x" 1 Unit Unit) Exists
+
+example_wrong_mult1 = norm [] (Abs "x" 1 Unit (Var "x")) (fnType "x" 2 Unit Unit) Exists
+example_wrong_mult2 = norm [] (Abs "x" 2 Unit (Var "x")) (fnType "x" 1 Unit Unit) Exists
+
+example_erased_eta = norm [] (Abs "y" 1 Unit (Var "y")) (fnType "y" 1 Unit Unit) Erased
+
+singleCtx : Ctx
+singleCtx=[("T",0,VSet,Nothing)]
+example3 = let (n ** env)=ctxToEnv singleCtx in norm env (Abs "x" 1 (typeVar "T") (Var "x")) (fnType "x" 1 (typeVar "T")  (typeVar "T") ) Exists
+
+boolCtx : Ctx
+boolCtx=[("b",1,VBool,Nothing)]
+example4 = let (n ** env)=ctxToEnv boolCtx in norm env (Elim (MkPreClosure "b" Bool) EmptyUsed True EmptyUsed False (SortedMap.fromList [("b",1)]) (Var "b")) Bool Exists
+
+
+tm=(Elim (MkPreClosure "b" Bool) EmptyUsed True EmptyUsed False (SortedMap.fromList [("b",1)]) (Var "b"))
+pty : Pretype
+pty=Bool
+env:Env 1
+env = [("b", (1, (VNeu VBool (NVar "b"), VBool)))]
+
+ty=typeEval (zeroEnv env) pty
+v=do 
+ty <- typeEval (zeroEnv env) pty
+eval env tm ty Exists
+
+n=do 
+ty <- typeEval (zeroEnv env) pty
+value <- eval env tm ty Exists
+readBackNormal env ty value Exists
